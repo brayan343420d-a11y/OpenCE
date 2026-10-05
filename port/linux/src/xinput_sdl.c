@@ -40,6 +40,9 @@ drive the controller.
 #include "sdl_platform.h"
 #include "port_config.h"
 #include "halo_keyboard.h"
+#ifdef HALO_ANDROID
+#include "touch_controls.h"
+#endif
 
 #include <SDL3/SDL.h>
 #include <math.h>
@@ -181,7 +184,22 @@ consumes for a few polls (menus, cutscenes) is dropped so it cannot jerk
 the view later */
 static void mouse_poll(const struct platform_input_state *input)
 {
+#ifdef HALO_ANDROID
+	/* a finger dragged over the screen turns the view like the mouse does */
+	float touch_x = 0.0f, touch_y = 0.0f;
+	BOOL touched = touch_controls_look(&touch_x, &touch_y);
+
+#endif
 	pthread_mutex_lock(&mouse_lock);
+#ifdef HALO_ANDROID
+	if (touched)
+	{
+		mouse_pending_x += touch_x;
+		mouse_pending_y += touch_y;
+		mouse_polls_unconsumed = 0;
+		mouse_aimed_ms = SDL_GetTicks();
+	}
+#endif
 	if (++mouse_polls_unconsumed > 4)
 	{
 		mouse_pending_x = 0.0f;
@@ -861,6 +879,9 @@ DWORD WINAPI XInputGetState(HANDLE device, PXINPUT_STATE state)
 		}
 		if (port_gamepad(gamepads, count, 0))
 			sdl_gamepad_state(gamepads[0], &state->Gamepad);
+#ifdef HALO_ANDROID
+		touch_controls_apply(&state->Gamepad);
+#endif
 		test_input_gamepad(&state->Gamepad);
 		if (abs(state->Gamepad.sThumbRX) > STICK_AIMING_DEFLECTION ||
 			abs(state->Gamepad.sThumbRY) > STICK_AIMING_DEFLECTION)
