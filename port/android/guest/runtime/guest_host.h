@@ -72,6 +72,9 @@ void host_sdl_get_clipboard_text(char *buffer, unsigned int size);
 void host_sdl_scancode_name(int scancode, char *buffer, unsigned int size);
 int host_sdl_scancode_from_name(const char *name);
 int host_sdl_show_toast(const char *message, int duration, int gravity, int x, int y);
+/* the on-screen keyboard: shows it (typed characters come back as key events)
+or hides it */
+int host_sdl_text_input(unsigned int window, int enabled);
 int host_sdl_show_simple_message_box(unsigned int flags, const char *title, const char *message);
 int host_sdl_get_gamepads(unsigned int *ids, int capacity);
 unsigned int host_sdl_open_gamepad(unsigned int id);
