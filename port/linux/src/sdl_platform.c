@@ -967,6 +967,42 @@ static CHAR ascii_from_key(SDL_Keycode key, SDL_Keymod modifiers)
 	return 0;
 }
 
+static void queue_text_input(const char *text)
+{
+	const unsigned char *p = (const unsigned char *)text;
+	while (p && *p)
+	{
+		unsigned char ch = *p++;
+		/* Halo's debug keyboard queue carries an ASCII byte. Keep ordinary
+		   UTF-8 text usable by accepting ASCII directly; common accented
+		   Spanish letters are folded to their ASCII equivalents. */
+		if (ch < 0x80)
+		{
+			struct platform_keystroke *k;
+			if (keystroke_count == KEYSTROKE_QUEUE_SIZE)
+			{
+				keystroke_head = (keystroke_head + 1) % KEYSTROKE_QUEUE_SIZE;
+				keystroke_count--;
+			}
+			k = &keystroke_queue[(keystroke_head + keystroke_count) % KEYSTROKE_QUEUE_SIZE];
+			k->virtual_key = 0;
+			k->ascii = ch;
+			k->flags = 0;
+			keystroke_count++;
+		}
+		else
+		{
+			/* Skip the remaining bytes of this UTF-8 codepoint. The game's
+			   legacy keyboard interface is byte/ASCII based. */
+			int continuation = 0;
+			if ((ch & 0xE0) == 0xC0) continuation = 1;
+			else if ((ch & 0xF0) == 0xE0) continuation = 2;
+			else if ((ch & 0xF8) == 0xF0) continuation = 3;
+			while (continuation-- > 0 && *p) p++;
+		}
+	}
+}
+
 static void queue_keystroke(const SDL_KeyboardEvent *event)
 {
 	struct platform_keystroke *keystroke;
@@ -1215,6 +1251,9 @@ void platform_pump_events(void)
 			pthread_mutex_unlock(&input_lock);
 			platform_log("window closed");
 			exit(EXIT_SUCCESS);
+		case SDL_EVENT_TEXT_INPUT:
+			queue_text_input(event.text.text);
+			break;
 		case SDL_EVENT_KEY_DOWN:
 		case SDL_EVENT_KEY_UP:
 			if (event.key.scancode < SDL_SCANCODE_COUNT)

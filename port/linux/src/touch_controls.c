@@ -50,12 +50,15 @@ enum control_id
 	C_L3, C_R3,
 	C_START, C_BACK,
 	C_DUP, C_DDOWN, C_DLEFT, C_DRIGHT,
+	C_KEYBOARD, C_COPY1, C_COPY2, C_COPY3, C_COPY4,
 	C_COUNT
 };
 
 struct control
 {
 	const char *label;
+	int source; /* -1 for normal/special control; duplicate source for COPY controls */
+	int image_slot; /* 0 = generated button, 1..8 = touch_button_N.bmp */
 	/* the centre as a fraction of the screen, and the diameter as a fraction
 	of its height (the saved layout keeps these, so it fits any screen) */
 	float x, y, size;
@@ -67,18 +70,24 @@ struct control
 
 static struct control controls[C_COUNT] =
 {
-	{ "", 0, 0, 0, 1 },
-	{ "A", 0, 0, 0, 1 }, { "B", 0, 0, 0, 1 }, { "X", 0, 0, 0, 1 }, { "Y", 0, 0, 0, 1 },
-	{ "LT", 0, 0, 0, 1 }, { "RT", 0, 0, 0, 1 },
-	{ "BLK", 0, 0, 0, 1 }, { "WHT", 0, 0, 0, 1 },
-	{ "L3", 0, 0, 0, 1 }, { "R3", 0, 0, 0, 1 },
-	{ "STA", 0, 0, 0, 1 }, { "BCK", 0, 0, 0, 1 },
-	{ "", 0, 0, 0, 1 }, { "", 0, 0, 0, 1 }, { "", 0, 0, 0, 1 }, { "", 0, 0, 0, 1 },
+	{ "", -1, 0, 0, 0, 0, 1 },
+	{ "A", -1, 0, 0, 0, 0, 1 }, { "B", -1, 0, 0, 0, 0, 1 }, { "X", -1, 0, 0, 0, 0, 1 }, { "Y", -1, 0, 0, 0, 0, 1 },
+	{ "LT", -1, 0, 0, 0, 0, 1 }, { "RT", -1, 0, 0, 0, 0, 1 },
+	{ "BLK", -1, 0, 0, 0, 0, 1 }, { "WHT", -1, 0, 0, 0, 0, 1 },
+	{ "L3", -1, 0, 0, 0, 0, 1 }, { "R3", -1, 0, 0, 0, 0, 1 },
+	{ "STA", -1, 0, 0, 0, 0, 1 }, { "BCK", -1, 0, 0, 0, 0, 1 },
+	{ "", -1, 0, 0, 0, 0, 1 }, { "", -1, 0, 0, 0, 0, 1 }, { "", -1, 0, 0, 0, 0, 1 }, { "", -1, 0, 0, 0, 0, 1 },
+	{ "KEY", -1, 0, 0, 0, 0, 1 }, { "C1", -1, 0, 0, 0.80f, 0.13f, 0 }, { "C2", -1, 0, 0, 0.80f, 0.13f, 0 }, { "C3", -1, 0, 0, 0.80f, 0.13f, 0 }, { "C4", -1, 0, 0, 0.80f, 0.13f, 0 },
 };
 
 static float opacity = 0.55f;
 /* mouse pixels per pixel of finger drag */
 static float look_scale = 1.5f;
+static int fps_enabled;
+static double fps_value;
+static Uint64 fps_last_ns;
+static unsigned fps_frames;
+static int keyboard_active;
 
 #define OPACITY_MINIMUM 0.15f
 #define OPACITY_MAXIMUM 1.0f
@@ -119,6 +128,13 @@ static void defaults(float aspect)
 	place(C_DDOWN, dx, dy + dpad, dpad);
 	place(C_DLEFT, dx - dpad / aspect, dy, dpad);
 	place(C_DRIGHT, dx + dpad / aspect, dy, dpad);
+	place(C_KEYBOARD, 0.50f, 0.94f, 0.075f);
+	controls[C_KEYBOARD].visible = 1;
+	for (int copy = C_COPY1; copy <= C_COPY4; copy++)
+	{
+		controls[copy].visible = 0;
+		controls[copy].source = -1;
+	}
 	opacity = 0.55f;
 	look_scale = 1.5f;
 }
@@ -188,9 +204,11 @@ static void layout_save(void)
 	}
 	fprintf(file, "opacity %.3f\n", (double)opacity);
 	fprintf(file, "look %.3f\n", (double)look_scale);
+	fprintf(file, "fps %d\n", fps_enabled);
 	for (id = 0; id < C_COUNT; id++)
-		fprintf(file, "c %d %.4f %.4f %.4f %d\n", id, (double)controls[id].x, (double)controls[id].y,
-			(double)controls[id].size, controls[id].visible);
+		fprintf(file, "c %d %.4f %.4f %.4f %d %d\n", id, (double)controls[id].x, (double)controls[id].y,
+			(double)controls[id].size, controls[id].visible, controls[id].source);
+		fprintf(file, "i %d %d\n", id, controls[id].image_slot);
 	fclose(file);
 }
 
@@ -206,7 +224,7 @@ static void layout_load(void)
 		return;
 	for (line = text; line && *line; line = next)
 	{
-		int id, visible;
+		int id, visible, source = -1;
 		float x, y, scale;
 
 		next = strchr(line, '\n');
@@ -216,6 +234,18 @@ static void layout_load(void)
 			opacity = clampf(scale, OPACITY_MINIMUM, OPACITY_MAXIMUM);
 		else if (sscanf(line, "look %f", &scale) == 1)
 			look_scale = clampf(scale, LOOK_MINIMUM, LOOK_MAXIMUM);
+		else if (sscanf(line, "fps %d", &id) == 1)
+			fps_enabled = id != 0;
+		else if (sscanf(line, "i %d %d", &id, &source) == 2 && id >= 0 && id < C_COUNT)
+			controls[id].image_slot = source >= 0 && source <= 8 ? source : 0;
+		else if (sscanf(line, "c %d %f %f %f %d %d", &id, &x, &y, &scale, &visible, &source) == 6 && id >= 0 && id < C_COUNT)
+		{
+			controls[id].x = clampf(x, 0.0f, 1.0f);
+			controls[id].y = clampf(y, 0.0f, 1.0f);
+			controls[id].size = clampf(scale, SIZE_MINIMUM, SIZE_MAXIMUM);
+			controls[id].visible = visible != 0;
+			controls[id].source = (source >= 0 && source < C_COUNT) ? source : -1;
+		}
 		else if (sscanf(line, "c %d %f %f %f %d", &id, &x, &y, &scale, &visible) == 5 && id >= 0 && id < C_COUNT)
 		{
 			controls[id].x = clampf(x, 0.0f, 1.0f);
@@ -279,7 +309,7 @@ static int gear_at(float px, float py)
 enum tool
 {
 	T_SIZE_UP, T_SIZE_DOWN, T_SHOW, T_OPACITY_UP, T_OPACITY_DOWN,
-	T_LOOK_UP, T_LOOK_DOWN, T_RESET, T_DONE,
+	T_LOOK_UP, T_LOOK_DOWN, T_FPS, T_DUPLICATE, T_IMAGE, T_KEYBOARD, T_RESET, T_DONE,
 	T_COUNT
 };
 
@@ -314,8 +344,8 @@ static float tool_top(void)
 
 static void tool_layout(struct tool_button *buttons)
 {
-	static const int column[T_COUNT] = { 0, 0, 0, 0, 0, 1, 1, 1, 1 };
-	static const int row[T_COUNT] = { 0, 1, 2, 3, 4, 0, 1, 2, 3 };
+	static const int column[T_COUNT] = { 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2 };
+	static const int row[T_COUNT] = { 0, 1, 2, 3, 4, 0, 1, 2, 3, 0, 1, 2, 3, 4 };
 	const float scale = tool_scale();
 	const float pad = 0.022f * (float)screen_h, gap = 0.012f * (float)screen_h;
 	const float height = 7.0f * scale + 2.0f * pad;
@@ -325,7 +355,7 @@ static void tool_layout(struct tool_button *buttons)
 
 	for (tool = 0; tool < T_COUNT; tool++)
 	{
-		float x = (float)screen_w * 0.5f + (column[tool] ? gap * 0.5f : -gap * 0.5f - width);
+		float x = (float)screen_w * 0.5f + ((float)column[tool] - 1.0f) * (width + gap);
 		float y = top + (float)row[tool] * (height + gap);
 
 		buttons[tool].x0 = x;
@@ -340,6 +370,10 @@ static void tool_layout(struct tool_button *buttons)
 	buttons[T_OPACITY_DOWN].label = "OPAC-";
 	buttons[T_LOOK_UP].label = "LOOK+";
 	buttons[T_LOOK_DOWN].label = "LOOK-";
+	buttons[T_FPS].label = fps_enabled ? "FPS ON" : "FPS OFF";
+	buttons[T_DUPLICATE].label = "DUP";
+	buttons[T_IMAGE].label = selected >= 0 ? "IMG+" : "IMAGE";
+	buttons[T_KEYBOARD].label = keyboard_active ? "KEY ON" : "KEY OFF";
 	buttons[T_RESET].label = "RESET";
 	buttons[T_DONE].label = "DONE";
 }
@@ -404,7 +438,38 @@ static void tool_press(int tool)
 		case T_LOOK_DOWN:
 			look_scale = clampf(look_scale - 0.25f, LOOK_MINIMUM, LOOK_MAXIMUM);
 			break;
+		case T_FPS:
+			fps_enabled = !fps_enabled;
+			fps_frames = 0; fps_last_ns = 0;
+			break;
+		case T_DUPLICATE:
+			if (selected >= 0)
+			{
+				int copy;
+				for (copy = C_COPY1; copy <= C_COPY4; copy++)
+					if (!controls[copy].visible) break;
+				if (copy <= C_COPY4)
+				{
+					controls[copy] = controls[selected];
+					controls[copy].source = selected >= C_COPY1 && selected <= C_COPY4 ? controls[selected].source : selected;
+					controls[copy].visible = 1;
+					controls[copy].x = clampf(controls[copy].x + 0.04f, 0.0f, 1.0f);
+					controls[copy].y = clampf(controls[copy].y + 0.04f, 0.0f, 1.0f);
+					selected = copy;
+				}
+			}
+			break;
+		case T_IMAGE:
+			if (selected >= 0)
+				controls[selected].image_slot = (controls[selected].image_slot + 1) % 9;
+			break;
+		case T_KEYBOARD:
+			keyboard_active = !keyboard_active;
+			if (keyboard_active) SDL_StartTextInput(SDL_GetKeyboardFocus());
+			else SDL_StopTextInput(SDL_GetKeyboardFocus());
+			break;
 		case T_RESET:
+			keyboard_active = 0;
 			defaults((float)screen_w / (float)screen_h);
 			selected = -1;
 			break;
@@ -412,6 +477,23 @@ static void tool_press(int tool)
 			editing_set(0);
 			break;
 	}
+}
+
+
+static int control_input_id(int id)
+{
+	if (id >= C_COPY1 && id <= C_COPY4)
+		return controls[id].source >= 0 ? controls[id].source : -1;
+	return id;
+}
+
+static void keyboard_toggle(void)
+{
+	keyboard_active = !keyboard_active;
+	if (keyboard_active)
+		SDL_StartTextInput(SDL_GetKeyboardFocus());
+	else
+		SDL_StopTextInput(SDL_GetKeyboardFocus());
 }
 
 /* ---------- fingers */
@@ -532,7 +614,13 @@ void touch_controls_event(const SDL_Event *event)
 			{
 				int id = control_at(x, y);
 
-				finger->role = id >= 0 ? id : ROLE_LOOK;
+				if (id == C_KEYBOARD)
+				{
+					keyboard_toggle();
+					finger->role = ROLE_UI;
+				}
+				else
+					finger->role = id >= 0 ? id : ROLE_LOOK;
 			}
 			break;
 		case SDL_EVENT_FINGER_MOTION:
@@ -581,14 +669,21 @@ void touch_controls_apply(XINPUT_GAMEPAD *pad)
 		if (held & bit(C_BACK)) pad->wButtons |= XINPUT_GAMEPAD_BACK;
 		if (held & bit(C_L3)) pad->wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
 		if (held & bit(C_R3)) pad->wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
-		if (held & bit(C_A)) pad->bAnalogButtons[XINPUT_GAMEPAD_A] = 0xff;
-		if (held & bit(C_B)) pad->bAnalogButtons[XINPUT_GAMEPAD_B] = 0xff;
-		if (held & bit(C_X)) pad->bAnalogButtons[XINPUT_GAMEPAD_X] = 0xff;
-		if (held & bit(C_Y)) pad->bAnalogButtons[XINPUT_GAMEPAD_Y] = 0xff;
-		if (held & bit(C_BLACK)) pad->bAnalogButtons[XINPUT_GAMEPAD_BLACK] = 0xff;
-		if (held & bit(C_WHITE)) pad->bAnalogButtons[XINPUT_GAMEPAD_WHITE] = 0xff;
-		if (held & bit(C_LT)) pad->bAnalogButtons[XINPUT_GAMEPAD_LEFT_TRIGGER] = 0xff;
-		if (held & bit(C_RT)) pad->bAnalogButtons[XINPUT_GAMEPAD_RIGHT_TRIGGER] = 0xff;
+		{
+			int id;
+			for (id = C_A; id < C_KEYBOARD; id++)
+			{
+				int source = control_input_id(id);
+				if (source >= C_A && source <= C_RT && (held & bit(id)))
+					pad->bAnalogButtons[source == C_A ? XINPUT_GAMEPAD_A : source == C_B ? XINPUT_GAMEPAD_B : source == C_X ? XINPUT_GAMEPAD_X : source == C_Y ? XINPUT_GAMEPAD_Y : source == C_BLACK ? XINPUT_GAMEPAD_BLACK : source == C_WHITE ? XINPUT_GAMEPAD_WHITE : source == C_LT ? XINPUT_GAMEPAD_LEFT_TRIGGER : XINPUT_GAMEPAD_RIGHT_TRIGGER] = 0xff;
+			}
+			for (id = C_COPY1; id <= C_COPY4; id++)
+			{
+				int source = control_input_id(id);
+				if (source >= C_A && source <= C_RT && (held & bit(id)))
+					pad->bAnalogButtons[source == C_A ? XINPUT_GAMEPAD_A : source == C_B ? XINPUT_GAMEPAD_B : source == C_X ? XINPUT_GAMEPAD_X : source == C_Y ? XINPUT_GAMEPAD_Y : source == C_BLACK ? XINPUT_GAMEPAD_BLACK : source == C_WHITE ? XINPUT_GAMEPAD_WHITE : source == C_LT ? XINPUT_GAMEPAD_LEFT_TRIGGER : XINPUT_GAMEPAD_RIGHT_TRIGGER] = 0xff;
+			}
+		}
 		if (stick_x != 0.0f || stick_y != 0.0f)
 		{
 			/* the screen's y runs down; the stick's runs up */
@@ -620,7 +715,7 @@ struct color
 };
 
 #define MAX_VERTICES 40000
-#define VERTEX_FLOATS 6
+#define VERTEX_FLOATS 8
 #define SEGMENTS 28
 
 static float vertices[MAX_VERTICES * VERTEX_FLOATS];
@@ -640,6 +735,28 @@ static void vertex(float x, float y, struct color c)
 	v[3] = c.g;
 	v[4] = c.b;
 	v[5] = c.a;
+	v[6] = 0.0f;
+	v[7] = 0.0f;
+}
+
+static void vertex_uv(float x, float y, float u, float vcoord, struct color c)
+{
+	float *v;
+	if (vertex_count >= MAX_VERTICES) return;
+	v = &vertices[vertex_count++ * VERTEX_FLOATS];
+	v[0] = x; v[1] = y;
+	v[2] = c.r; v[3] = c.g; v[4] = c.b; v[5] = c.a;
+	v[6] = u; v[7] = vcoord;
+}
+
+static void textured_quad(float x0, float y0, float x1, float y1, struct color c)
+{
+	vertex_uv(x0, y0, 0.0f, 0.0f, c);
+	vertex_uv(x1, y0, 1.0f, 0.0f, c);
+	vertex_uv(x1, y1, 1.0f, 1.0f, c);
+	vertex_uv(x0, y0, 0.0f, 0.0f, c);
+	vertex_uv(x1, y1, 1.0f, 1.0f, c);
+	vertex_uv(x0, y1, 0.0f, 1.0f, c);
 }
 
 static void triangle(float x0, float y0, float x1, float y1, float x2, float y2, struct color c)
@@ -815,7 +932,7 @@ static void control_draw(int id)
 	float cx = control_x(id), cy = control_y(id), radius = control_radius(id);
 	int down = (held & bit(id)) != 0;
 	float alpha = controls[id].visible ? opacity : 0.18f;
-	struct color body = control_color(id), white = color_make(1.0f, 1.0f, 1.0f, 1.0f);
+	struct color body = control_color((id >= C_COPY1 && id <= C_COPY4 && controls[id].source >= 0) ? controls[id].source : id), white = color_make(1.0f, 1.0f, 1.0f, 1.0f);
 	float thickness = radius * 0.08f > 2.0f ? radius * 0.08f : 2.0f;
 
 	if (down)
@@ -831,7 +948,7 @@ static void control_draw(int id)
 		white.a = clampf(alpha + 0.2f, 0.0f, 1.0f);
 		disc(cx + stick_x * (radius - knob), cy + stick_y * (radius - knob), knob, white);
 	}
-	else if (id >= C_DUP)
+	else if (id >= C_DUP && id <= C_DRIGHT)
 	{
 		int dx = id == C_DLEFT ? -1 : id == C_DRIGHT ? 1 : 0;
 		int dy = id == C_DUP ? -1 : id == C_DDOWN ? 1 : 0;
@@ -850,7 +967,8 @@ static void control_draw(int id)
 		body.a = alpha * 0.85f;
 		disc(cx, cy, radius, body);
 		ring(cx, cy, radius, thickness, white);
-		text_centered(cx, cy, radius * 0.17f, radius * 1.4f, controls[id].label,
+		text_centered(cx, cy, radius * 0.17f, radius * 1.4f,
+			(id >= C_COPY1 && id <= C_COPY4 && controls[id].source >= 0) ? controls[controls[id].source].label : controls[id].label,
 			id == C_WHITE ? color_make(0.1f, 0.1f, 0.1f, white.a) : white);
 	}
 	if (editing && id == selected)
@@ -912,6 +1030,12 @@ static void interface_draw(void)
 	white.a = editing ? 1.0f : 0.6f;
 	ring(gx, gy, gr, gr * 0.1f > 2.0f ? gr * 0.1f : 2.0f, white);
 	text_centered(gx, gy, gr * 0.14f, gr * 1.5f, editing ? "OK" : "EDIT", white);
+	if (fps_enabled)
+	{
+		char fps_text[32];
+		snprintf(fps_text, sizeof(fps_text), "FPS %.0f", fps_value);
+		text_draw(0.02f * (float)screen_h, 0.02f * (float)screen_h, tool_scale() * 0.8f, fps_text, white);
+	}
 	if (editing)
 		editor_draw();
 }
@@ -919,18 +1043,26 @@ static void interface_draw(void)
 /* ---------- OpenGL */
 
 static GLuint program, vertex_array, vertex_buffer;
+static GLuint image_textures[9];
+static unsigned char image_ready[9];
+static int image_initialized;
 static GLint viewport_uniform = -1;
+static GLint texture_uniform = -1;
+static GLint use_texture_uniform = -1;
 static int gl_state; /* 0: not yet, 1: ready, -1: failed */
 
 static const char *vertex_source =
 	"#version 300 es\n"
 	"layout(location = 0) in vec2 position;\n"
 	"layout(location = 1) in vec4 color;\n"
+	"layout(location = 2) in vec2 texcoord_in;\n"
 	"uniform vec2 viewport;\n"
 	"out vec4 tint;\n"
+	"out vec2 texcoord;\n"
 	"void main()\n"
 	"{\n"
 	"\ttint = color;\n"
+	"\ttexcoord = texcoord_in;\n"
 	"\tgl_Position = vec4(position.x / viewport.x * 2.0 - 1.0, 1.0 - position.y / viewport.y * 2.0, 0.0, 1.0);\n"
 	"}\n";
 
@@ -938,10 +1070,13 @@ static const char *fragment_source =
 	"#version 300 es\n"
 	"precision mediump float;\n"
 	"in vec4 tint;\n"
+	"in vec2 texcoord;\n"
 	"out vec4 result;\n"
+	"uniform sampler2D button_texture;\n"
+	"uniform int use_texture;\n"
 	"void main()\n"
 	"{\n"
-	"\tresult = tint;\n"
+	"\tresult = use_texture != 0 ? texture(button_texture, texcoord) * tint : tint;\n"
 	"}\n";
 
 static GLuint shader_compile(GLenum type, const char *source)
@@ -997,6 +1132,8 @@ static int gl_initialize(void)
 		return 0;
 	}
 	viewport_uniform = glGetUniformLocation(program, "viewport");
+	texture_uniform = glGetUniformLocation(program, "button_texture");
+	use_texture_uniform = glGetUniformLocation(program, "use_texture");
 	glGenVertexArrays(1, &vertex_array);
 	glGenBuffers(1, &vertex_buffer);
 	glBindVertexArray(vertex_array);
@@ -1005,11 +1142,58 @@ static int gl_initialize(void)
 	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, VERTEX_FLOATS * sizeof(float), (const void *)0);
 	glEnableVertexAttribArray(1);
 	glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, VERTEX_FLOATS * sizeof(float), (const void *)(2 * sizeof(float)));
+	glEnableVertexAttribArray(2);
+	glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, VERTEX_FLOATS * sizeof(float), (const void *)(6 * sizeof(float)));
 	return 1;
+}
+
+static void image_load_all(void)
+{
+	char folder[1024], path[1200];
+	int slot;
+	if (image_initialized) return;
+	config_folder(folder, sizeof(folder));
+	for (slot = 1; slot <= 8; slot++)
+	{
+		SDL_Surface *surface, *converted;
+		snprintf(path, sizeof(path), "%stouch_button_%d.bmp", folder, slot);
+		surface = SDL_LoadBMP(path);
+		if (!surface) continue;
+		converted = SDL_ConvertSurface(surface, SDL_PIXELFORMAT_ABGR8888);
+		SDL_DestroySurface(surface);
+		if (!converted) continue;
+		glGenTextures(1, &image_textures[slot]);
+		glBindTexture(GL_TEXTURE_2D, image_textures[slot]);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, converted->w, converted->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, converted->pixels);
+	SDL_DestroySurface(converted);
+	image_ready[slot] = 1;
+	}
+	image_initialized = 1;
 }
 
 void touch_controls_draw(void)
 {
+	if (fps_enabled)
+	{
+		Uint64 now = SDL_GetTicksNS();
+		if (fps_last_ns && now > fps_last_ns)
+		{
+			Uint64 elapsed = now - fps_last_ns;
+			fps_value = 1000000000.0 / ((double)elapsed / (double)(fps_frames ? fps_frames : 1));
+		}
+		fps_frames++;
+		if (!fps_last_ns) fps_last_ns = now;
+		else if (now - fps_last_ns >= 1000000000ULL)
+		{
+			fps_value = (double)fps_frames * 1000000000.0 / (double)(now - fps_last_ns);
+			fps_frames = 0;
+			fps_last_ns = now;
+		}
+	}
 	GLint previous_vertex_array = 0, previous_program = 0, previous_buffer = 0;
 	int count;
 
@@ -1034,6 +1218,7 @@ void touch_controls_draw(void)
 		glBindBuffer(GL_ARRAY_BUFFER, (GLuint)previous_buffer);
 		return;
 	}
+	if (!image_initialized) image_load_all();
 	if (count <= 0)
 		return;
 	glViewport(0, 0, screen_w, screen_h);
@@ -1047,10 +1232,31 @@ void touch_controls_draw(void)
 	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glUseProgram(program);
 	glUniform2f(viewport_uniform, (float)screen_w, (float)screen_h);
+	glUniform1i(use_texture_uniform, 0);
+	glActiveTexture(GL_TEXTURE0);
 	glBindVertexArray(vertex_array);
 	glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer);
 	glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)count * VERTEX_FLOATS * sizeof(float)), vertices, GL_STREAM_DRAW);
 	glDrawArrays(GL_TRIANGLES, 0, count);
+	if (image_initialized)
+	{
+		int id;
+		glUniform1i(use_texture_uniform, 1);
+		glUniform1i(texture_uniform, 0);
+		for (id = 0; id < C_COUNT; id++)
+		{
+			int slot = controls[id].image_slot;
+			if (!controls[id].visible || slot <= 0 || slot > 8 || !image_ready[slot]) continue;
+			vertex_count = 0;
+			textured_quad(control_x(id) - control_radius(id), control_y(id) - control_radius(id),
+				control_x(id) + control_radius(id), control_y(id) + control_radius(id),
+				color_make(1.0f, 1.0f, 1.0f, opacity));
+			glBindTexture(GL_TEXTURE_2D, image_textures[slot]);
+			glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)((size_t)vertex_count * VERTEX_FLOATS * sizeof(float)), vertices, GL_STREAM_DRAW);
+			glDrawArrays(GL_TRIANGLES, 0, vertex_count);
+		}
+		glUniform1i(use_texture_uniform, 0);
+	}
 	glBindVertexArray((GLuint)previous_vertex_array);
 	glUseProgram((GLuint)previous_program);
 	glBindBuffer(GL_ARRAY_BUFFER, (GLuint)previous_buffer);
