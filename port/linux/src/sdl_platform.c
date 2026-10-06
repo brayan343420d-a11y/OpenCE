@@ -15,6 +15,9 @@ and the debug keyboard that the game's console reads.
 #include "port_config.h"
 #include "p2p.h"
 #include "xiso.h"
+#ifdef HALO_ANDROID
+#include "touch_controls.h"
+#endif
 
 #include <SDL3/SDL.h>
 #include <stdio.h>
@@ -835,6 +838,9 @@ void platform_video_swap(void)
 	Uint64 interval, now;
 
 #endif
+#ifdef HALO_ANDROID
+	touch_controls_draw();
+#endif
 	SDL_GL_SwapWindow(platform_window);
 #ifndef HALO_ANDROID
 	interval = frame_interval_ns();
@@ -1000,6 +1006,20 @@ BOOL platform_next_keystroke(struct platform_keystroke *keystroke)
 	pthread_mutex_unlock(&input_lock);
 	return result;
 }
+
+#ifdef HALO_ANDROID
+/* the on-screen keyboard (the touch controls' keyboard button): what is typed
+comes back as key events */
+void platform_text_input(BOOL enabled)
+{
+	if (!platform_window)
+		return;
+	if (enabled)
+		SDL_StartTextInput(platform_window);
+	else
+		SDL_StopTextInput(platform_window);
+}
+#endif
 
 /* ---------- internet play's invite links (p2p.c) */
 
@@ -1368,6 +1388,14 @@ void platform_pump_events(void)
 		case SDL_EVENT_GAMEPAD_ADDED:
 			SDL_OpenGamepad(event.gdevice.which);
 			break;
+#ifdef HALO_ANDROID
+		case SDL_EVENT_FINGER_DOWN:
+		case SDL_EVENT_FINGER_MOTION:
+		case SDL_EVENT_FINGER_UP:
+		case SDL_EVENT_FINGER_CANCELED:
+			touch_controls_event(&event);
+			break;
+#endif
 		default:
 			break;
 		}
