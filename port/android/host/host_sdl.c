@@ -173,16 +173,97 @@ int host_sdl_gl_swap_window(uint32_t window)
 
 /* ---------- events */
 
+/* Typed text. The on-screen keyboard (host_sdl_text_input) sends text
+events, whose strings the guest cannot read (they hold pointers); the game
+also takes what a player types (a profile's name) from key events. So each
+character of a text event is passed on as the press and release of the key
+that types it. A key event of the same key just before (a hardware
+keyboard, or a keyboard that sends both) is the same letter: not twice. */
+#define TEXT_QUEUE_SIZE 128
+
+static SDL_Event text_queue[TEXT_QUEUE_SIZE];
+static int text_head, text_count;
+static SDL_Keycode last_key;
+static Uint64 last_key_ticks;
+
+static void text_key_queue(char character)
+{
+	SDL_Keycode key = (unsigned char)character;
+	SDL_Keymod modifiers = 0, needed = 0;
+	SDL_Scancode scancode;
+	int stage;
+
+	if (key < 32 || key > 126)
+		return;
+	if (key >= 'A' && key <= 'Z')
+	{
+		key += 'a' - 'A';
+		modifiers = SDL_KMOD_LSHIFT;
+	}
+	if (key == last_key && SDL_GetTicks() - last_key_ticks < 80)
+		return;
+	scancode = SDL_GetScancodeFromKey(key, &needed);
+	if (scancode == SDL_SCANCODE_UNKNOWN)
+		return;
+	for (stage = 0; stage < 2; stage++)
+	{
+		SDL_Event *entry;
+
+		if (text_count >= TEXT_QUEUE_SIZE)
+			return;
+		entry = &text_queue[(text_head + text_count++) % TEXT_QUEUE_SIZE];
+		memset(entry, 0, sizeof(*entry));
+		entry->key.type = stage ? SDL_EVENT_KEY_UP : SDL_EVENT_KEY_DOWN;
+		entry->key.timestamp = SDL_GetTicksNS();
+		entry->key.scancode = scancode;
+		entry->key.key = key;
+		entry->key.mod = (SDL_Keymod)(modifiers | needed);
+		entry->key.down = stage == 0;
+	}
+}
+
 int host_sdl_poll_event(void *event)
 {
 	SDL_Event host_event;
 
-	if (!SDL_PollEvent(&host_event))
+	for (;;)
+	{
+		if (text_count)
+		{
+			memcpy(event, &text_queue[text_head], sizeof(SDL_Event));
+			text_head = (text_head + 1) % TEXT_QUEUE_SIZE;
+			text_count--;
+			return 1;
+		}
+		if (!SDL_PollEvent(&host_event))
+			return 0;
+		if (host_event.type == SDL_EVENT_TEXT_INPUT)
+		{
+			const char *text = host_event.text.text;
+
+			for (; text && *text; text++)
+				text_key_queue(*text);
+			continue;
+		}
+		if (host_event.type == SDL_EVENT_KEY_DOWN)
+		{
+			last_key = host_event.key.key;
+			last_key_ticks = SDL_GetTicks();
+		}
+		/* the layouts agree except for the pointers of text, drop and user
+		events, which the guest does not read */
+		memcpy(event, &host_event, sizeof(host_event));
+		return 1;
+	}
+}
+
+int host_sdl_text_input(uint32_t window, int enabled)
+{
+	SDL_Window *object = handle_get(window, _handle_window);
+
+	if (!object)
 		return 0;
-	/* the layouts agree except for the pointers of text, drop and user
-	events, which the guest does not read */
-	memcpy(event, &host_event, sizeof(host_event));
-	return 1;
+	return (enabled ? SDL_StartTextInput(object) : SDL_StopTextInput(object)) ? 1 : 0;
 }
 
 /* ---------- gamepads */
